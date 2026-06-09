@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Inventory Scanner</title>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3"></script>
+
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;
+  font-family:Inter,Arial,sans-serif;
+  background:#07111f;
+  color:#fff;
+}
+.app{
+  min-height:100vh;
+  padding:16px;
+  background:linear-gradient(160deg,#07111f,#102a43,#050b12);
+}
+.header{
+  text-align:center;
+  margin-bottom:14px;
+}
+.header h1{
+  margin:0;
+  font-size:24px;
+  letter-spacing:.5px;
+}
+.header p{
+  margin:6px 0 0;
+  color:#a9bed6;
+  font-size:13px;
+}
+.scanner{
+  position:relative;
+  width:100%;
+  max-width:520px;
+  margin:auto;
+  border-radius:26px;
+  overflow:hidden;
+  background:#000;
+  box-shadow:0 20px 60px rgba(0,0,0,.45);
+}
+video,canvas{
+  width:100%;
+  height:68vh;
+  object-fit:cover;
+  display:block;
+}
+canvas{
+  position:absolute;
+  inset:0;
+}
+.scan-line{
+  position:absolute;
+  left:0;
+  right:0;
+  height:3px;
+  background:#00ffd5;
+  box-shadow:0 0 18px #00ffd5;
+  animation:scan 2.2s infinite linear;
+}
+@keyframes scan{
+  0%{top:8%}
+  100%{top:92%}
+}
+.panel{
+  max-width:520px;
+  margin:14px auto 0;
+  padding:16px;
+  border-radius:22px;
+  background:rgba(255,255,255,.08);
+  backdrop-filter:blur(16px);
+  border:1px solid rgba(255,255,255,.12);
+}
+.count{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+}
+.count strong{
+  font-size:46px;
+  color:#00ffd5;
+}
+.status{
+  margin-top:10px;
+  color:#b9c8d8;
+  font-size:13px;
+}
+.controls{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:10px;
+  margin-top:14px;
+}
+button,select{
+  border:0;
+  border-radius:14px;
+  padding:13px;
+  font-weight:700;
+  font-size:14px;
+}
+button{
+  background:#00ffd5;
+  color:#061018;
+}
+button.secondary{
+  background:#1d3557;
+  color:white;
+}
+select{
+  grid-column:1/3;
+  background:#0b1d33;
+  color:white;
+}
+.list{
+  margin-top:12px;
+  font-size:14px;
+  color:#d9e7f5;
+}
+.item{
+  display:flex;
+  justify-content:space-between;
+  padding:8px 0;
+  border-bottom:1px solid rgba(255,255,255,.08);
+}
+.warning{
+  margin-top:10px;
+  font-size:12px;
+  color:#ffd166;
+}
+</style>
+</head>
+
+<body>
+<div class="app">
+  <div class="header">
+    <h1>Smart Inventory Scanner</h1>
+    <p>Hitung objek barang gudang secara real-time lewat kamera</p>
+  </div>
+
+  <div class="scanner">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="canvas"></canvas>
+    <div class="scan-line"></div>
+  </div>
+
+  <div class="panel">
+    <div class="count">
+      <div>
+        <div>Total Objek</div>
+        <strong id="total">0</strong>
+      </div>
+      <div id="fps">Loading...</div>
+    </div>
+
+    <div class="status" id="status">Memuat model AI...</div>
+
+    <div class="controls">
+      <button onclick="startScanner()">Mulai Scan</button>
+      <button class="secondary" onclick="resetCount()">Reset</button>
+
+      <select id="filter">
+        <option value="all">Hitung semua objek</option>
+        <option value="bottle">Botol</option>
+        <option value="cup">Cup/Gelas</option>
+        <option value="box">Box/Kotak*</option>
+        <option value="cell phone">Handphone</option>
+        <option value="book">Buku/Paket tipis</option>
+        <option value="chair">Kursi</option>
+      </select>
+    </div>
+
+    <div class="list" id="list"></div>
+
+    <div class="warning">
+      Catatan: akurasi tergantung cahaya, jarak, tumpukan barang, dan jenis objek. Untuk gudang asli, model perlu dilatih khusus dengan foto barang inventori Anda.
+    </div>
+  </div>
+</div>
+
+<script>
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const totalEl = document.getElementById("total");
+const statusEl = document.getElementById("status");
+const listEl = document.getElementById("list");
+const fpsEl = document.getElementById("fps");
+const filterEl = document.getElementById("filter");
+
+let model;
+let running = false;
+let lastTime = performance.now();
+
+async function loadModel(){
+  model = await cocoSsd.load();
+  statusEl.innerText = "Model siap. Tekan Mulai Scan.";
+}
+
+async function startCamera(){
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video:{
+      facingMode:{ ideal:"environment" },
+      width:{ ideal:1280 },
+      height:{ ideal:720 }
+    },
+    audio:false
+  });
+  video.srcObject = stream;
+
+  return new Promise(resolve=>{
+    video.onloadedmetadata = () => resolve();
+  });
+}
+
+async function startScanner(){
+  if(!model){
+    statusEl.innerText = "Model masih dimuat...";
+    return;
+  }
+
+  await startCamera();
+
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+
+  running = true;
+  detectLoop();
+}
+
+function resetCount(){
+  totalEl.innerText = "0";
+  listEl.innerHTML = "";
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+}
+
+async function detectLoop(){
+  if(!running) return;
+
+  const predictions = await model.detect(video);
+  const selected = filterEl.value;
+
+  const valid = predictions.filter(p => {
+    const confidenceOK = p.score >= 0.62;
+    const filterOK = selected === "all" || p.class === selected;
+    return confidenceOK && filterOK;
+  });
+
+  drawDetections(valid);
+  updateCounter(valid);
+  updateFps();
+
+  requestAnimationFrame(detectLoop);
+}
+
+function drawDetections(items){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.lineWidth = 3;
+  ctx.font = "18px Arial";
+
+  items.forEach(item=>{
+    const [x,y,w,h] = item.bbox;
+
+    ctx.strokeStyle = "#00ffd5";
+    ctx.fillStyle = "rgba(0,255,213,.18)";
+    ctx.strokeRect(x,y,w,h);
+    ctx.fillRect(x,y,w,h);
+
+    ctx.fillStyle = "#00ffd5";
+    ctx.fillText(
+      `${item.class} ${Math.round(item.score * 100)}%`,
+      x + 8,
+      y > 24 ? y - 8 : y + 24
+    );
+  });
+}
+
+function updateCounter(items){
+  const map = {};
+
+  items.forEach(item=>{
+    map[item.class] = (map[item.class] || 0) + 1;
+  });
+
+  totalEl.innerText = items.length;
+
+  listEl.innerHTML = Object.entries(map).map(([name,count])=>`
+    <div class="item">
+      <span>${name}</span>
+      <strong>${count}</strong>
+    </div>
+  `).join("");
+
+  statusEl.innerText = items.length
+    ? "Objek terdeteksi real-time."
+    : "Arahkan kamera ke barang.";
+}
+
+function updateFps(){
+  const now = performance.now();
+  const fps = Math.round(1000 / (now - lastTime));
+  lastTime = now;
+  fpsEl.innerText = `${fps} FPS`;
+}
+
+loadModel();
+</script>
+</body>
+</html>
